@@ -65,6 +65,7 @@ def run(
         None, "--cookies-from-browser", help="Example: chrome, edge, firefox"
     ),
     no_keep_raw: bool = typer.Option(False, "--no-keep-raw"),
+    no_cache: bool = typer.Option(False, "--no-cache"),
 ) -> None:
     """Run download, FFmpeg extraction, Whisper transcription, and Ollama analysis."""
     opts = WorkflowOptions(
@@ -79,10 +80,12 @@ def run(
         skip_analysis=skip_analysis,
         cookies_from_browser=cookies_from_browser,
         keep_raw=not no_keep_raw,
+        use_cache=not no_cache,
     )
     result = run_workflow(opts)
     console.print(f"[green]Done[/green] run_id={result.run_id}")
     console.print(f"Run dir: {result.run_dir}")
+    console.print(f"Cache hit: {result.cache_hit}")
     if result.warnings:
         for warning in result.warnings:
             console.print(f"[yellow]Warning:[/yellow] {warning}")

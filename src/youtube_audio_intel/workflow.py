@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -36,6 +37,7 @@ class WorkflowOptions:
     cookies_from_browser: str | None = None
     keep_raw: bool = True
     chunk_chars: int = 9000
+    use_cache: bool = True
 
 
 @dataclass
@@ -45,6 +47,7 @@ class WorkflowResult:
     metadata: dict[str, Any]
     files: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    cache_hit: bool = False
 
 
 def slugify(value: str, max_len: int = 80) -> str:
@@ -114,6 +117,23 @@ def run_command(args: list[str]) -> None:
             + "\nSTDERR:\n"
             + proc.stderr
         )
+
+
+def cache_inputs(opts: WorkflowOptions) -> dict[str, Any]:
+    return {
+        "url": opts.url,
+        "model": opts.model,
+        "language": opts.language,
+        "ollama_model": opts.ollama_model,
+        "skip_analysis": opts.skip_analysis,
+        "keep_raw": opts.keep_raw,
+        "chunk_chars": opts.chunk_chars,
+    }
+
+
+def cache_key(opts: WorkflowOptions) -> str:
+    payload = json.dumps(cache_inputs(opts), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def prepare_run_dir(output_root: Path, title: str | None = None) -> tuple[str, Path]:
@@ -366,8 +386,65 @@ def collect_files(run_dir: Path) -> dict[str, str]:
     return files
 
 
+def cache_compatible_with_legacy_result(opts: WorkflowOptions, payload: dict[str, Any]) -> bool:
+    metadata = payload.get("metadata") or {}
+    files = payload.get("files") or {}
+    webpage_url = metadata.get("webpage_url") or metadata.get("url")
+    if webpage_url != opts.url:
+        return False
+    if opts.model != "large-v3":
+        return False
+    if opts.language is not None:
+        return False
+    if opts.ollama_model != "qwen3:8b":
+        return False
+    if opts.chunk_chars != 9000:
+        return False
+    if opts.skip_analysis and "transcript/transcript.json" not in files:
+        return False
+    if not opts.skip_analysis and "analysis/final-report.md" not in files:
+        return False
+    if opts.keep_raw and not any(name.startswith("raw/") for name in files):
+        return False
+    return True
+
+
+def load_cached_result(output_root: Path, opts: WorkflowOptions, key: str) -> WorkflowResult | None:
+    for result_path in sorted(output_root.glob("*/result.json"), reverse=True):
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        payload_key = payload.get("cache_key")
+        if payload_key != key and not (
+            payload_key is None and cache_compatible_with_legacy_result(opts, payload)
+        ):
+            continue
+        run_dir = Path(payload["run_dir"])
+        if not run_dir.exists():
+            continue
+        files = payload.get("files") or {}
+        if "result.json" not in files:
+            files["result.json"] = str(result_path)
+        return WorkflowResult(
+            run_id=payload["run_id"],
+            run_dir=run_dir,
+            metadata=payload.get("metadata") or {},
+            files=files,
+            warnings=payload.get("warnings") or [],
+            cache_hit=True,
+        )
+    return None
+
+
 def run_workflow(opts: WorkflowOptions) -> WorkflowResult:
     opts.output_root.mkdir(parents=True, exist_ok=True)
+    key = cache_key(opts)
+    if opts.use_cache:
+        cached = load_cached_result(opts.output_root, opts, key)
+        if cached:
+            return cached
+
     run_id, run_dir = prepare_run_dir(opts.output_root)
     warnings: list[str] = []
     metadata: dict[str, Any] = {"url": opts.url}
@@ -401,6 +478,7 @@ def run_workflow(opts: WorkflowOptions) -> WorkflowResult:
             run_dir=run_dir,
             metadata=metadata,
             warnings=warnings,
+            cache_hit=False,
         )
         result.files = collect_files(run_dir)
         result.files["result.json"] = str(result_path)
@@ -412,6 +490,9 @@ def run_workflow(opts: WorkflowOptions) -> WorkflowResult:
                     "metadata": result.metadata,
                     "files": result.files,
                     "warnings": result.warnings,
+                    "cache_key": key,
+                    "cache_inputs": cache_inputs(opts),
+                    "cache_hit": result.cache_hit,
                 },
                 ensure_ascii=False,
                 indent=2,

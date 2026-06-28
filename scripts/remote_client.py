@@ -46,6 +46,7 @@ def main() -> int:
     parser.add_argument("--ollama-model", default="qwen3:8b")
     parser.add_argument("--whisper-model", default="large-v3")
     parser.add_argument("--skip-analysis", action="store_true")
+    parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--poll-seconds", type=int, default=10)
     args = parser.parse_args()
 
@@ -55,6 +56,7 @@ def main() -> int:
         "ollama_model": args.ollama_model,
         "whisper_model": args.whisper_model,
         "skip_analysis": args.skip_analysis,
+        "use_cache": not args.no_cache,
     }
     job = request_json("POST", f"{server}/jobs", args.api_key, payload)
     job_id = job["job_id"]

@@ -80,6 +80,7 @@ Job detail responses include:
 
 - `files`: full artifact index by relative path
 - `downloads`: ready-to-use absolute URLs for common outputs such as report, transcript, subtitles, metadata, and result JSON
+- matching requests reuse cached results by default unless the caller disables cache
 
 Queue behavior:
 

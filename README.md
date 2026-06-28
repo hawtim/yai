@@ -80,6 +80,8 @@ Typical output files:
 - `analysis/final-report.md`
 - `result.json`
 
+By default, YAI reuses cached results for matching requests. Use `--no-cache` on the CLI or `"use_cache": false` in the API request body to force a fresh run.
+
 ## Running As A Service
 
 Start the API server on the GPU host:

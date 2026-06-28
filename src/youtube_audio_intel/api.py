@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .resources import get_system_stats, primary_gpu_is_cool
-from .workflow import DEFAULT_RUNS_DIR, WorkflowOptions, run_workflow
+from .workflow import DEFAULT_RUNS_DIR, WorkflowOptions, cache_key, load_cached_result, run_workflow
 
 
 app = FastAPI(title="YouTube Audio Intel API", version="0.1.0")
@@ -49,6 +49,7 @@ class JobRequest(BaseModel):
     skip_analysis: bool = False
     cookies_from_browser: str | None = None
     keep_raw: bool = True
+    use_cache: bool = True
 
 
 class JobStatus(BaseModel):
@@ -144,6 +145,31 @@ def job_status_response(request: Request, job_id: str) -> JobStatus:
     return JobStatus(**payload)
 
 
+def build_workflow_options(request: JobRequest) -> WorkflowOptions:
+    return WorkflowOptions(
+        url=request.url,
+        output_root=Path(request.output_root) if request.output_root else DEFAULT_RUNS_DIR,
+        model=request.whisper_model,
+        device=request.device,
+        compute_type=request.compute_type,
+        language=request.language,
+        ollama_url=request.ollama_url,
+        ollama_model=request.ollama_model,
+        skip_analysis=request.skip_analysis,
+        cookies_from_browser=request.cookies_from_browser,
+        keep_raw=request.keep_raw,
+        use_cache=request.use_cache,
+    )
+
+
+def find_existing_job_by_cache_key(key: str) -> str | None:
+    with jobs_lock:
+        for job_id, job in jobs.items():
+            if job.get("cache_key") == key and job.get("status") in {"queued", "running", "succeeded"}:
+                return job_id
+    return None
+
+
 def execute_job(job_id: str) -> None:
     with jobs_lock:
         job = jobs.get(job_id)
@@ -153,19 +179,7 @@ def execute_job(job_id: str) -> None:
         job["started_at"] = now_iso()
         request = job["request"]
     try:
-        opts = WorkflowOptions(
-            url=request.url,
-            output_root=Path(request.output_root) if request.output_root else DEFAULT_RUNS_DIR,
-            model=request.whisper_model,
-            device=request.device,
-            compute_type=request.compute_type,
-            language=request.language,
-            ollama_url=request.ollama_url,
-            ollama_model=request.ollama_model,
-            skip_analysis=request.skip_analysis,
-            cookies_from_browser=request.cookies_from_browser,
-            keep_raw=request.keep_raw,
-        )
+        opts = build_workflow_options(request)
         result = run_workflow(opts)
         with jobs_lock:
             jobs[job_id].update(
@@ -177,6 +191,7 @@ def execute_job(job_id: str) -> None:
                         "run_dir": str(result.run_dir),
                         "metadata": result.metadata,
                         "warnings": result.warnings,
+                        "cache_hit": result.cache_hit,
                     },
                     "files": result.files,
                 }
@@ -297,6 +312,35 @@ def submit_job(
 ) -> JobStatus:
     require_api_key(x_api_key)
     start_workers()
+    opts = build_workflow_options(job_request)
+    key = cache_key(opts)
+    if job_request.use_cache:
+        existing_job_id = find_existing_job_by_cache_key(key)
+        if existing_job_id:
+            return job_status_response(request, existing_job_id)
+        cached_result = load_cached_result(opts.output_root, opts, key)
+        if cached_result:
+            job_id = uuid.uuid4().hex
+            with jobs_lock:
+                jobs[job_id] = {
+                    "job_id": job_id,
+                    "status": "succeeded",
+                    "result": {
+                        "run_id": cached_result.run_id,
+                        "run_dir": str(cached_result.run_dir),
+                        "metadata": cached_result.metadata,
+                        "warnings": cached_result.warnings,
+                        "cache_hit": cached_result.cache_hit,
+                    },
+                    "error": None,
+                    "files": cached_result.files,
+                    "created_at": now_iso(),
+                    "started_at": now_iso(),
+                    "finished_at": now_iso(),
+                    "request": job_request,
+                    "cache_key": key,
+                }
+            return job_status_response(request, job_id)
     if job_queue.full():
         raise HTTPException(
             status_code=429,
@@ -317,6 +361,7 @@ def submit_job(
             "started_at": None,
             "finished_at": None,
             "request": job_request,
+            "cache_key": key,
         }
     try:
         job_queue.put_nowait(job_id)
