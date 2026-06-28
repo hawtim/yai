@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -57,6 +57,7 @@ class JobStatus(BaseModel):
     result: dict | None = None
     error: str | None = None
     files: dict[str, str] = Field(default_factory=dict)
+    downloads: dict[str, str] = Field(default_factory=dict)
     created_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
@@ -108,6 +109,39 @@ def serialize_job(job_id: str) -> dict:
     else:
         payload["queue_position"] = None
     return payload
+
+
+def build_download_url(request: Request, job_id: str, file_path: str) -> str:
+    encoded = file_path.replace("\\", "/")
+    return str(request.url_for("get_file", job_id=job_id, file_path=encoded))
+
+
+def build_downloads(request: Request, job_payload: dict) -> dict[str, str]:
+    files = job_payload.get("files") or {}
+    job_id = job_payload["job_id"]
+    preferred = {
+        "report_markdown": "analysis/final-report.md",
+        "transcript_markdown": "transcript/transcript.md",
+        "transcript_json": "transcript/transcript.json",
+        "transcript_srt": "transcript/transcript.srt",
+        "metadata_json": "metadata.json",
+        "result_json": "result.json",
+    }
+    downloads = {
+        "job": str(request.url_for("get_job", job_id=job_id)),
+        "queue": str(request.url_for("get_queue")),
+        "resources": str(request.url_for("get_resources")),
+    }
+    for key, file_path in preferred.items():
+        if file_path in files:
+            downloads[key] = build_download_url(request, job_id, file_path)
+    return downloads
+
+
+def job_status_response(request: Request, job_id: str) -> JobStatus:
+    payload = serialize_job(job_id)
+    payload["downloads"] = build_downloads(request, payload)
+    return JobStatus(**payload)
 
 
 def execute_job(job_id: str) -> None:
@@ -228,7 +262,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/queue", response_model=QueueStatus)
-def get_queue(x_api_key: str | None = Header(None)) -> QueueStatus:
+def get_queue(request: Request, x_api_key: str | None = Header(None)) -> QueueStatus:
     require_api_key(x_api_key)
     with jobs_lock:
         statuses = [job["status"] for job in jobs.values()]
@@ -252,13 +286,15 @@ def get_queue(x_api_key: str | None = Header(None)) -> QueueStatus:
 
 
 @app.get("/resources")
-def get_resources(x_api_key: str | None = Header(None)) -> dict:
+def get_resources(request: Request, x_api_key: str | None = Header(None)) -> dict:
     require_api_key(x_api_key)
     return get_system_stats()
 
 
 @app.post("/jobs", response_model=JobStatus)
-def submit_job(request: JobRequest, x_api_key: str | None = Header(None)) -> JobStatus:
+def submit_job(
+    request: Request, job_request: JobRequest, x_api_key: str | None = Header(None)
+) -> JobStatus:
     require_api_key(x_api_key)
     start_workers()
     if job_queue.full():
@@ -280,7 +316,7 @@ def submit_job(request: JobRequest, x_api_key: str | None = Header(None)) -> Job
             "created_at": now_iso(),
             "started_at": None,
             "finished_at": None,
-            "request": request,
+            "request": job_request,
         }
     try:
         job_queue.put_nowait(job_id)
@@ -288,17 +324,19 @@ def submit_job(request: JobRequest, x_api_key: str | None = Header(None)) -> Job
         with jobs_lock:
             jobs.pop(job_id, None)
         raise HTTPException(status_code=429, detail="Job queue is full")
-    return JobStatus(**serialize_job(job_id))
+    return job_status_response(request, job_id)
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)
-def get_job(job_id: str, x_api_key: str | None = Header(None)) -> JobStatus:
+def get_job(request: Request, job_id: str, x_api_key: str | None = Header(None)) -> JobStatus:
     require_api_key(x_api_key)
-    return JobStatus(**serialize_job(job_id))
+    return job_status_response(request, job_id)
 
 
-@app.get("/jobs/{job_id}/files/{file_path:path}")
-def get_file(job_id: str, file_path: str, x_api_key: str | None = Header(None)) -> FileResponse:
+@app.get("/jobs/{job_id}/files/{file_path:path}", name="get_file")
+def get_file(
+    job_id: str, file_path: str, x_api_key: str | None = Header(None)
+) -> FileResponse:
     require_api_key(x_api_key)
     payload = serialize_job(job_id)
     files = payload.get("files") or {}

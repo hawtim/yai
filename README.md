@@ -106,6 +106,8 @@ Useful endpoints:
 - `GET /jobs/{job_id}`
 - `GET /jobs/{job_id}/files/{file_path}`
 
+`GET /jobs/{job_id}` includes a `downloads` object with ready-to-use URLs for common artifacts, so clients usually do not need to build file URLs manually.
+
 Check current queue and host load:
 
 ```powershell

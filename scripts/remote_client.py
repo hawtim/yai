@@ -6,7 +6,6 @@ import os
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -76,20 +75,29 @@ def main() -> int:
         print(job.get("error", "job failed"), file=sys.stderr)
         return 1
 
-    preferred = [
-        "analysis/final-report.md",
-        "transcript/transcript.md",
-        "transcript/transcript.json",
-        "transcript/transcript.srt",
-        "metadata.json",
-        "result.json",
-    ]
+    preferred_downloads = {
+        "report_markdown": "analysis/final-report.md",
+        "transcript_markdown": "transcript/transcript.md",
+        "transcript_json": "transcript/transcript.json",
+        "transcript_srt": "transcript/transcript.srt",
+        "metadata_json": "metadata.json",
+        "result_json": "result.json",
+    }
+    downloads = job.get("downloads") or {}
+    downloaded = set()
+    for key, target_name in preferred_downloads.items():
+        if key in downloads:
+            download_file(downloads[key], output_dir / target_name, args.api_key)
+            print(f"downloaded {target_name}")
+            downloaded.add(target_name)
+
     files = job.get("files") or {}
-    for name in preferred:
-        if name in files:
-            encoded = urllib.parse.quote(name, safe="/")
-            download_file(f"{server}/jobs/{job_id}/files/{encoded}", output_dir / name, args.api_key)
-            print(f"downloaded {name}")
+    for target_name in preferred_downloads.values():
+        if target_name in downloaded:
+            continue
+        if target_name in files:
+            download_file(f"{server}/jobs/{job_id}/files/{target_name}", output_dir / target_name, args.api_key)
+            print(f"downloaded {target_name}")
     print(f"output_dir={output_dir.resolve()}")
     return 0
 

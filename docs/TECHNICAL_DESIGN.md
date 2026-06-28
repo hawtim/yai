@@ -71,9 +71,15 @@ Endpoints:
 
 - `GET /health`
 - `GET /queue`
+- `GET /resources`
 - `POST /jobs`
 - `GET /jobs/{job_id}`
 - `GET /jobs/{job_id}/files/{file_path}`
+
+Job detail responses include:
+
+- `files`: full artifact index by relative path
+- `downloads`: ready-to-use absolute URLs for common outputs such as report, transcript, subtitles, metadata, and result JSON
 
 Queue behavior:
 
